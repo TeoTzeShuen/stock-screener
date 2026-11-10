@@ -1,0 +1,12 @@
+# Pulled data: raw Yahoo Finance snapshot (Yahoo's terms do not permit redistribution)
+data/
+
+# Output files (rebuilt by the scripts; the workbook also embeds raw Yahoo data)
+*.xlsx
+universe.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

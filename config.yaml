@@ -1,0 +1,41 @@
+# Configuration for the one-off US dividend stock screen.
+# Every threshold used by the filters lives here; nothing is hard-coded in the logic.
+
+asof_date: "2026-11-10"        # snapshot date; raw data lives in data/raw_<asof_date>/
+universe_file: "baseline.md"   # source of truth for tickers and groups
+benchmark_ticker: "SPY"
+
+thresholds:
+  dividend_yield_min: 0.03       # criterion 1: trailing 12-month yield, default 3.0% (unconfirmed by user)
+  dividend_yield_alt: 0.04       # reported for comparison only (the original 4% ask)
+  beta_max: 1.0                  # criterion 2: beta must be below this
+  fcf_cover_min: 1.0             # criterion 3: FCF / cash dividends paid, at least this
+  dividend_record_years: [2021, 2022, 2023, 2024, 2025]   # criterion 4: full calendar years
+  interest_cover_min: 3.0        # criterion 5: EBIT / interest expense above this
+  market_cap_min_usd: 1000000000     # criterion 6: market cap above this
+
+beta:
+  months: 60                     # monthly returns on adjusted close versus the benchmark
+  min_months: 36                 # fewer complete months than this -> no_data
+
+fetch:
+  sleep_seconds: 1.5             # pause between tickers
+  max_attempts: 4                # retries on errors or empty responses
+  backoff_seconds: 5             # doubled after each failed attempt
+  price_history_period: "6y"
+
+# Tickers left out of the peer median D/E (ticker: reason). Empty by default.
+median_exclusions:
+  HONA: "balance sheet at 31 Dec 2025 pre-dates the June 2026 spin-off: USD 0.3bn debt against USD 0.8bn annual interest expense, so not sensible"
+
+# Known issues with the universe, shown in the Flags column and the Assumptions sheet.
+ticker_notes:
+  HONA: "Honeywell Aerospace began trading on 29 June 2026 after its spin-off; it has no five-year dividend record, so it fails C4 by construction, and its beta cannot be computed."
+  NVS: "ADR of a foreign company (files 20-F); check the data flags before relying on the result."
+  AZN: "ADR of a foreign company (files 20-F); check the data flags before relying on the result."
+  SONY: "ADR of a foreign company (files 20-F); check the data flags before relying on the result."
+
+sanity:                        # ranges used for warnings only, never for pass/fail
+  yield_max: 0.15
+  beta_min: -0.5
+  beta_max: 3.0
