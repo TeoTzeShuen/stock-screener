@@ -222,6 +222,37 @@ def group_medians(metrics: list[dict], excluded: dict) -> dict:
     return out
 
 
+# ----------------------------------------------------------------------------- thresholds
+
+# Thresholds that can be set per group: config key -> (Excel name, column label, number format, scale to Excel units).
+GROUP_THRESHOLDS = {
+    "dividend_yield_min": ("yield_min", "C1 min dividend yield", "0.0%", 1),
+    "beta_max": ("beta_max", "C2 max beta", "0.00", 1),
+    "fcf_cover_min": ("fcf_cover_min", "C3 min FCF cover (x)", "0.00", 1),
+    "dividend_record_min_years": ("div_years_min", "C4 min dividend years", "0", 1),
+    "interest_cover_min": ("interest_cover_min", "C5 min interest cover (x)", "0.0", 1),
+    "market_cap_min_usd": ("mcap_min_bn", "C6 min market cap (USD bn)", "#,##0.0", 1e-9),
+}
+
+
+def resolve_thresholds(cfg: dict, groups: list[str]) -> dict[str, dict]:
+    """Thresholds per group: the defaults in cfg['thresholds'], overridden by cfg['group_thresholds']."""
+    overrides = cfg.get("group_thresholds") or {}
+    for group, values in overrides.items():
+        if group not in groups:
+            raise ValueError(f"group_thresholds: unknown group {group!r}; expected one of {groups}")
+        for key, value in (values or {}).items():
+            if key not in GROUP_THRESHOLDS:
+                raise ValueError(f"group_thresholds[{group!r}]: {key!r} cannot be set per group; "
+                                 f"expected one of {list(GROUP_THRESHOLDS)}")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"group_thresholds[{group!r}][{key!r}] must be a number, got {value!r}")
+    missing = [k for k in GROUP_THRESHOLDS if k not in cfg["thresholds"]]
+    if missing:
+        raise ValueError(f"thresholds: missing default(s) {missing}")
+    return {g: {**cfg["thresholds"], **(overrides.get(g) or {})} for g in groups}
+
+
 # ----------------------------------------------------------------------------- filters
 # Each filter is a pure function of the metrics and thresholds: returns (status, reason).
 
@@ -259,9 +290,9 @@ def f_fcf(m: dict, th: dict):
 def f_record(m: dict, th: dict):
     if m["div_years_missed"] is None:
         return NO_DATA, "dividend history missing"
-    if m["div_years_missed"]:
-        return FAIL, "no dividend in " + ", ".join(map(str, m["div_years_missed"]))
-    return PASS, "dividend in every year " + f"{th['dividend_record_years'][0]}-{th['dividend_record_years'][-1]}"
+    paid, total, need = len(m["div_years_paid"]), len(th["dividend_record_years"]), th["dividend_record_min_years"]
+    missed = f" (none in {', '.join(map(str, m['div_years_missed']))})" if m["div_years_missed"] else ""
+    return (PASS if paid >= need else FAIL), f"dividend in {paid} of {total} years{missed} vs minimum {need}"
 
 
 def f_leverage(m: dict, th: dict, median: float | None):
@@ -373,7 +404,8 @@ def normalise_xlsx(path: Path, asof: str) -> None:
             zout.writestr(zi, data)
 
 
-def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench: pd.Series, path: Path) -> None:
+def export(metrics: list[dict], medians: dict, thresholds: dict, manifest: dict, cfg: dict, bench: pd.Series,
+           path: Path) -> None:
     th = cfg["thresholds"]
     wb = Workbook()
 
@@ -387,7 +419,8 @@ def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench:
     asof = cfg["asof_date"]
     yrs = th["dividend_record_years"]
     year_cols = [f"Dividends per share {y}" for y in yrs]
-    header = ["Ticker", "Name", "Group", "Overall", *CRITERIA,
+    applied = {name: f"Applied: {label[3:]}" for name, label, _, _ in GROUP_THRESHOLDS.values()}
+    header = ["Ticker", "Name", "Group", "Overall", *CRITERIA, *applied.values(),
               "Price (USD)", "Market cap (USD bn)", "Dividend history status", "Yahoo indicated annual dividend",
               "TTM dividends per share", "Payments in TTM", "Payments in prior 12 months", "Dividend yield",
               "Beta (monthly vs SPY)", "Beta months used", "Fiscal year end", "Statement currency",
@@ -428,19 +461,21 @@ def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench:
         ebit, intr, ic_st, ic = c["EBIT (m)"], c["Interest expense (m)"], c["Interest cover status"], c["Interest cover (x)"]
         ret = f"Returns!${series_col[m['ticker']]}$2:${series_col[m['ticker']]}${r_last}"
         crit = f"{c[CRITERIA[0]]}:{c[CRITERIA[-1]]}"
+        t = {name: c[label] for name, label in applied.items()}      # this row's applied thresholds
+        pick = f"MATCH({c['Group']},th_groups,0)"
         sumifs = lambda fn, lo, hi: (f'{fn}({"" if fn == "COUNTIFS" else d_amt + ","}{d_tic},$A{r},'  # noqa: E731
                                      f'{d_date},{lo},{d_date},{hi})')
         f = {
             "Overall": f'=IF(COUNTIF({crit},"fail")>0,"fail",IF(COUNTIF({crit},"pass")={len(CRITERIA)},"pass","no_data"))',
-            "C1 yield": f'=IF({y}="","no_data",IF({y}>=th_yield_min,"pass","fail"))',
-            "C2 beta": f'=IF({beta}="","no_data",IF({beta}<th_beta_max,"pass","fail"))',
+            "C1 yield": f'=IF({y}="","no_data",IF({y}>={t['yield_min']},"pass","fail"))',
+            "C2 beta": f'=IF({beta}="","no_data",IF({beta}<{t['beta_max']},"pass","fail"))',
             "C3 FCF cover": f'=IF({fcf}="","no_data",IF({fcf}<=0,"fail",IF({div}="","no_data",IF({div}=0,"pass",'
-                            f'IF({fcf}/{div}>=th_fcf_cover_min,"pass","fail")))))',
-            "C4 dividend record": f'=IF({n_years}="","no_data",IF({n_years}>=th_div_years_min,"pass","fail"))',
-            "C5 leverage": f'=IF(OR(AND({de_st}="ok",ISNUMBER({med}),N({de})<N({med})),AND({ic_st}="ok",N({ic})>th_interest_cover_min)),"pass",'
+                            f'IF({fcf}/{div}>={t['fcf_cover_min']},"pass","fail")))))',
+            "C4 dividend record": f'=IF({n_years}="","no_data",IF({n_years}>={t['div_years_min']},"pass","fail"))',
+            "C5 leverage": f'=IF(OR(AND({de_st}="ok",ISNUMBER({med}),N({de})<N({med})),AND({ic_st}="ok",N({ic})>{t['interest_cover_min']})),"pass",'
                            f'IF(AND(OR({de_st}="not computable",{de_st}="excluded",AND({de_st}="ok",ISNUMBER({med}))),'
                            f'{ic_st}<>"missing"),"fail","no_data"))',
-            "C6 size": f'=IF({mcap}="","no_data",IF({mcap}>th_mcap_min_bn,"pass","fail"))',
+            "C6 size": f'=IF({mcap}="","no_data",IF({mcap}>{t['mcap_min_bn']},"pass","fail"))',
             "TTM dividends per share": f'=IF({hist}="missing","",{sumifs("SUMIFS", chr(34) + ">" + chr(34) + "&(asof_date-th_ttm_days)", chr(34) + "<=" + chr(34) + "&asof_date")})',
             "Payments in TTM": f'=IF({hist}="missing","",{sumifs("COUNTIFS", chr(34) + ">" + chr(34) + "&(asof_date-th_ttm_days)", chr(34) + "<=" + chr(34) + "&asof_date")})',
             "Payments in prior 12 months": f'=IF({hist}="missing","",{sumifs("COUNTIFS", chr(34) + ">" + chr(34) + "&(asof_date-2*th_ttm_days)", chr(34) + "<=" + chr(34) + "&(asof_date-th_ttm_days)")})',
@@ -457,6 +492,9 @@ def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench:
             "Interest cover status": f'=IF(OR({ebit}="",{intr}=""),"missing",IF({intr}<=0,"not computable","ok"))',
             "Interest cover (x)": f'=IF({ic_st}="ok",{ebit}/{intr},"")',
         }
+        # A blank group cell on the Thresholds sheet falls back to the default row.
+        for name, label in applied.items():
+            f[label] = f'=IF(INDEX(th_{name},{pick})="",th_{name}_default,INDEX(th_{name},{pick}))'
         for yr, name in zip(yrs, year_cols):
             f[name] = f'=IF({hist}="missing","",{sumifs("SUMIFS", chr(34) + ">=" + chr(34) + f"&DATE({yr},1,1)", chr(34) + "<=" + chr(34) + f"&DATE({yr},12,31)")})'
         hist_status = ("missing" if not m["has_dividend_data"]
@@ -481,6 +519,7 @@ def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench:
     formats = {"Price (USD)": "0.00", "Market cap (USD bn)": "#,##0.0", "TTM dividends per share": "0.000",
                "Yahoo indicated annual dividend": "0.000", "Dividend yield": "0.00%", "Beta (monthly vs SPY)": "0.00",
                "FCF cover (x)": "0.00", "Debt-to-equity": "0.00", "Peer median D/E": "0.00", "Interest cover (x)": "0.0",
+               **{applied[name]: fmt for name, _, fmt, _ in GROUP_THRESHOLDS.values()},
                **{h: "0.000" for h in year_cols}, **{h: num for h in header if h.endswith("(m)")}}
     write_sheet(ws, header, rows, formats, {"Name": 30, "Group": 22, "D/E exclusion reason": 30, "Data notes": 70,
                                             "Flags and caveats": 70})
@@ -491,46 +530,84 @@ def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench:
             operator="equal", formula=[f'"{status}"'],
             fill=PatternFill(start_color=fill.fgColor.rgb, end_color=fill.fgColor.rgb, fill_type="solid")))
 
-    # --- Thresholds (editable inputs and a live summary)
+    # --- Thresholds (editable per-group inputs, calculation settings and a live summary)
     ws = wb.create_sheet("Thresholds")
-    inputs = [
-        ("th_yield_min", "C1 minimum dividend yield", th["dividend_yield_min"], "0.0%", "Pass if trailing dividend yield is at least this"),
-        ("th_beta_max", "C2 maximum beta", th["beta_max"], "0.00", "Pass if beta is below this"),
-        ("th_fcf_cover_min", "C3 minimum FCF cover (x)", th["fcf_cover_min"], "0.00", "Pass if FCF is positive and FCF / cash dividends paid is at least this"),
-        ("th_div_years_min", f"C4 minimum dividend years (of {len(yrs)})", len(yrs), "0", f"Pass if a dividend was paid in at least this many of the calendar years {yrs[0]}-{yrs[-1]}"),
-        ("th_interest_cover_min", "C5 minimum interest cover (x)", th["interest_cover_min"], "0.0", "Pass if interest cover is above this, or D/E is below the peer median"),
-        ("th_mcap_min_bn", "C6 minimum market cap (USD bn)", th["market_cap_min_usd"] / 1e9, "#,##0.0", "Pass if market cap is above this"),
-        ("th_beta_min_months", "Beta: minimum months of returns", cfg["beta"]["min_months"], "0", f"Beta is blank (no_data) with fewer monthly returns than this; at most {cfg['beta']['months']} are available"),
-        ("th_ttm_days", "Dividend window (days)", 365, "0", "Length of the trailing window used for dividends per share and yield"),
-    ]
-    write_sheet(ws, ["Threshold", "Value (edit me)", "Default from config.yaml", "Rule"],
-                [[label, value, value, rule] for _, label, value, _, rule in inputs],
-                widths={"Threshold": 36, "Value (edit me)": 16, "Default from config.yaml": 16, "Rule": 80},
-                filterable=False)
-    ws.row_dimensions[1].height = 32
-    for i, (name, _, _, fmt, _) in enumerate(inputs, 2):
-        ws[f"B{i}"].number_format = ws[f"C{i}"].number_format = fmt
-        ws[f"B{i}"].fill = PatternFill("solid", fgColor="FFF2CC")
-        ws[f"B{i}"].font = Font(bold=True, color="0000FF")
-        wb.defined_names[name] = DefinedName(name, attr_text=f"Thresholds!$B${i}")
-    arow = len(inputs) + 2
-    ws[f"A{arow}"], ws[f"B{arow}"] = "As-of date (fixed)", dt.date.fromisoformat(asof)
-    ws[f"D{arow}"] = "Date of the snapshot. Prices and market caps are as of this date, so it should not be changed."
-    ws[f"B{arow}"].number_format = "yyyy-mm-dd"
-    wb.defined_names["asof_date"] = DefinedName("asof_date", attr_text=f"Thresholds!$B${arow}")
-    top = arow + 2
-    ws[f"A{top}"] = ("Change the yellow cells and every sheet recalculates. Raw inputs on the Screen sheet (and the D/E "
-                     "exclusion reason column) can be edited too. Re-running screen.py resets everything to the snapshot "
-                     "and the config.yaml defaults.")
-    ws[f"A{top + 2}"], ws[f"B{top + 2}"], ws[f"C{top + 2}"], ws[f"D{top + 2}"] = "Live summary", PASS, FAIL, NO_DATA
-    for cell in ws[top + 2][:4]:
+    groups = list(medians)
+    overrides = cfg.get("group_thresholds") or {}
+    keys = list(GROUP_THRESHOLDS)
+    labels = [GROUP_THRESHOLDS[k][1] + (f" (of {len(yrs)})" if k == "dividend_record_min_years" else "") for k in keys]
+    scaled = lambda k, v: v * GROUP_THRESHOLDS[k][3]  # noqa: E731
+    rows = [["Default (all groups)", *[scaled(k, th[k]) for k in keys]]]
+    rows += [[g, *[scaled(k, overrides[g][k]) if k in (overrides.get(g) or {}) else None for k in keys]] for g in groups]
+    write_sheet(ws, ["Group", *labels], rows, widths={"Group": 36, **{h: 16 for h in labels}}, filterable=False)
+    ws.row_dimensions[1].height = 45
+    g_first, g_end = 3, 2 + len(groups)
+    wb.defined_names["th_groups"] = DefinedName("th_groups", attr_text=f"Thresholds!$A${g_first}:$A${g_end}")
+    for i, k in enumerate(keys, 2):
+        name, _, fmt, _ = GROUP_THRESHOLDS[k]
+        letter = get_column_letter(i)
+        for r in range(2, g_end + 1):
+            ws[f"{letter}{r}"].number_format = fmt
+            ws[f"{letter}{r}"].fill = PatternFill("solid", fgColor="FFF2CC")
+            ws[f"{letter}{r}"].font = Font(bold=(r == 2), color="0000FF")
+        wb.defined_names[f"th_{name}_default"] = DefinedName(f"th_{name}_default", attr_text=f"Thresholds!${letter}$2")
+        wb.defined_names[f"th_{name}"] = DefinedName(f"th_{name}", attr_text=f"Thresholds!${letter}${g_first}:${letter}${g_end}")
+    ws["A2"].font = Font(bold=True)
+    row = g_end + 2
+    for text in ("Edit the yellow cells. A blank group cell uses the default row; type a number to override it for that group. "
+                 "The thresholds actually applied to each stock are shown in the 'Applied' columns on the Screen sheet.",
+                 "Rules: C1 yield at least the minimum | C2 beta below the maximum | C3 FCF positive and FCF / dividends paid at least the minimum | "
+                 f"C4 dividend paid in at least this many of the years {yrs[0]}-{yrs[-1]} | C5 interest cover above the minimum, or D/E below the peer median | "
+                 "C6 market cap above the minimum.",
+                 "Raw inputs on the Screen, Dividends and Prices sheets can be edited too. Re-running screen.py resets everything to the "
+                 "snapshot and to config.yaml."):
+        ws[f"A{row}"] = text
+        row += 1
+    row += 1
+    ws[f"A{row}"], ws[f"B{row}"], ws[f"C{row}"] = "Calculation setting (all groups)", "Value", "Note"
+    for cell in ws[row][:3]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = HEADER_FILL
-    for i, name in enumerate(["Overall", *CRITERIA], top + 3):
-        ws[f"A{i}"] = name
+    settings = [
+        ("th_beta_min_months", "Beta: minimum months of returns", cfg["beta"]["min_months"], "0", True,
+         f"Beta is blank (no_data) with fewer monthly returns than this; at most {cfg['beta']['months']} are available"),
+        ("th_ttm_days", "Dividend window (days)", 365, "0", True, "Length of the trailing window used for dividends per share and yield"),
+        ("asof_date", "As-of date (fixed)", dt.date.fromisoformat(asof), "yyyy-mm-dd", False,
+         "Date of the snapshot. Prices and market caps are as of this date, so it should not be changed."),
+    ]
+    for name, label, value, fmt, editable, note in settings:
+        row += 1
+        ws[f"A{row}"], ws[f"B{row}"], ws[f"C{row}"] = label, value, note
+        ws[f"B{row}"].number_format = fmt
+        if editable:
+            ws[f"B{row}"].fill = PatternFill("solid", fgColor="FFF2CC")
+            ws[f"B{row}"].font = Font(bold=True, color="0000FF")
+        wb.defined_names[name] = DefinedName(name, attr_text=f"Thresholds!$B${row}")
+    row += 2
+    summary_row = row
+
+    def summary_header(r, title):
+        ws[f"A{r}"], ws[f"B{r}"], ws[f"C{r}"], ws[f"D{r}"] = title, PASS, FAIL, NO_DATA
+        for cell in ws[r][:4]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = HEADER_FILL
+
+    summary_header(row, "Live summary: all stocks")
+    for name in ["Overall", *CRITERIA]:
+        row += 1
+        ws[f"A{row}"] = name
         for letter, status in zip("BCD", (PASS, FAIL, NO_DATA)):
-            ws[f"{letter}{i}"] = f'=COUNTIF(Screen!${col[name]}$2:${col[name]}${last},"{status}")'
-    ws[f"A{top + 3}"].font = Font(bold=True)
+            ws[f"{letter}{row}"] = f'=COUNTIF(Screen!${col[name]}$2:${col[name]}${last},"{status}")'
+    ws[f"A{summary_row + 1}"].font = Font(bold=True)
+    row += 2
+    group_summary_row = row
+    summary_header(row, "Live summary: overall result by group")
+    for i, g in enumerate(groups):
+        row += 1
+        ws[f"A{row}"] = f"=$A${g_first + i}"
+        for letter, status in zip("BCD", (PASS, FAIL, NO_DATA)):
+            ws[f"{letter}{row}"] = (f'=COUNTIFS({grp_rng},$A{row},'
+                                    f'Screen!${col["Overall"]}$2:${col["Overall"]}${last},"{status}")')
 
     # --- Group medians (live: median over names whose D/E status is "ok")
     ws = wb.create_sheet("Group medians")
@@ -560,6 +637,10 @@ def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench:
         ["Formulas", "Everything derivable is an Excel formula: yield, payment counts and dividend years come from the Dividends sheet; beta from the Prices and Returns sheets; "
                      "FCF, FCF cover, D/E, interest cover, the peer median D/E and every pass/fail result from the raw inputs on the Screen sheet and the editable cells on the Thresholds sheet. "
                      "Threshold figures quoted on this sheet are the config.yaml defaults the workbook was built with."],
+        ["Thresholds by group", "Each of the six thresholds can differ by group. Defaults are in config.yaml under 'thresholds' and per-group overrides under 'group_thresholds'. "
+                                + ("Overrides in this build: " + "; ".join(f"{g}: " + ", ".join(f"{k}={v}" for k, v in (o or {}).items()) for g, o in (cfg.get("group_thresholds") or {}).items() if o) + "."
+                                   if any((cfg.get("group_thresholds") or {}).values()) else "No overrides in this build: every group uses the defaults.")
+                                + " The figures quoted below are the defaults."],
         ["Redistribution", "The Dividends and Prices sheets hold raw Yahoo data. Yahoo's terms do not permit redistribution, so do not publish this workbook."],
         ["Result at defaults", f"pass {tally('overall', PASS)}, fail {tally('overall', FAIL)}, no_data {tally('overall', NO_DATA)} "
                            f"at the default {th['dividend_yield_min']:.1%} yield threshold (computed by the script)"],
@@ -572,7 +653,7 @@ def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench:
                     f"(covariance / variance), complete months only. Pass if below {th['beta_max']}. Fewer than {cfg['beta']['min_months']} months gives no_data."],
         ["C3 FCF covers dividend", f"Latest annual operating cash flow minus capital expenditure must be positive, and FCF / total cash dividends paid at least {th['fcf_cover_min']}x. "
                                    "A company with positive FCF that paid no cash dividends passes this criterion trivially (it still fails C1 and C4)."],
-        ["C4 Dividend record", f"At least one dividend with an ex-dividend date in each full calendar year {yrs[0]} to {yrs[-1]}, from dividend history rather than the financial statements."],
+        ["C4 Dividend record", f"At least one dividend with an ex-dividend date in at least {th['dividend_record_min_years']} of the {len(yrs)} full calendar years {yrs[0]} to {yrs[-1]}, from dividend history rather than the financial statements."],
         ["C5 Leverage", f"Pass if debt-to-equity is below the peer median of the group, or interest cover (EBIT / interest expense) is above {th['interest_cover_min']}x. "
                         "Debt-to-equity = total debt including lease obligations / total shareholders' equity, latest annual balance sheet, same definition for every ticker. "
                         "EBIT is Yahoo's figure (pre-tax income plus interest expense), so it includes non-operating and one-off items."],
@@ -630,8 +711,8 @@ def export(metrics: list[dict], medians: dict, manifest: dict, cfg: dict, bench:
 
 # ----------------------------------------------------------------------------- main
 
-def run(out: Path | None = None) -> list[dict]:
-    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+def run(out: Path | None = None, cfg: dict | None = None) -> list[dict]:
+    cfg = cfg or yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
     raw = ROOT / "data" / f"raw_{cfg['asof_date']}"
     manifest = json.loads((raw / "manifest.json").read_text(encoding="utf-8"))
     manifest["packages"]["openpyxl"] = version("openpyxl")
@@ -643,12 +724,14 @@ def run(out: Path | None = None) -> list[dict]:
     metrics = [compute_metrics(r, raw, manifest, bench_returns, cfg) for r in universe]
     medians = group_medians(metrics, cfg.get("median_exclusions") or {})
     notes = cfg.get("ticker_notes", {})
+    thresholds = resolve_thresholds(cfg, list(medians))
     for m in metrics:
-        apply_filters(m, cfg["thresholds"], medians[m["group"]]["median"])
+        m["thresholds"] = thresholds[m["group"]]
+        apply_filters(m, m["thresholds"], medians[m["group"]]["median"])
         m["flags"] = ([notes[m["ticker"]]] if m["ticker"] in notes else []) + sanity_warnings(m, cfg)
         if m["fetch_status"] != "ok":
             m["flags"].append(f"fetch status: {m['fetch_status']}")
-    export(metrics, medians, manifest, cfg, bench, out or ROOT / "results.xlsx")
+    export(metrics, medians, thresholds, manifest, cfg, bench, out or ROOT / "results.xlsx")
     return metrics
 
 

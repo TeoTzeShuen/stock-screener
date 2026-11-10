@@ -39,6 +39,28 @@ is today's date, because Yahoo only serves current data; set it before fetching.
 | `data/raw_<asof-date>/` | Frozen raw responses. Yahoo's terms do not permit redistribution, so do not publish this folder |
 | `results.xlsx` | Output: `Screen`, `Thresholds`, `Group medians`, `Assumptions`, `Fetch log`, plus the formula inputs `Dividends`, `Prices`, `Returns` |
 
+## Thresholds by group
+
+Each of the six thresholds can differ by group. `config.yaml` holds the defaults under `thresholds` and
+optional per-group overrides under `group_thresholds`; anything not overridden uses the default.
+
+```yaml
+group_thresholds:
+  "Tech (Not AI)":
+    dividend_yield_min: 0.02
+  "Consumer staples":
+    dividend_yield_min: 0.035
+    beta_max: 0.8
+```
+
+Keys that can be overridden: `dividend_yield_min`, `beta_max`, `fcf_cover_min`,
+`dividend_record_min_years`, `interest_cover_min`, `market_cap_min_usd`. Group names must match
+`baseline.md` exactly; an unknown group or key stops the script with an error.
+
+In the workbook, the `Thresholds` sheet has a default row and one row per group. A blank group cell uses
+the default; a number overrides it for that group. The `Applied` columns on `Screen` show the thresholds
+used for each stock.
+
 ## Changing things in Excel
 
 Everything derivable in `results.xlsx` is a formula. Edit the yellow cells on the `Thresholds` sheet, or any

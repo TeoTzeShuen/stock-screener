@@ -11,8 +11,21 @@ thresholds:
   beta_max: 1.0                  # criterion 2: beta must be below this
   fcf_cover_min: 1.0             # criterion 3: FCF / cash dividends paid, at least this
   dividend_record_years: [2021, 2022, 2023, 2024, 2025]   # criterion 4: full calendar years
+  dividend_record_min_years: 5   # criterion 4: a dividend in at least this many of those years
   interest_cover_min: 3.0        # criterion 5: EBIT / interest expense above this
   market_cap_min_usd: 1000000000     # criterion 6: market cap above this
+
+# Per-group overrides of the thresholds above. Group names must match baseline.md exactly.
+# Keys that can be overridden: dividend_yield_min, beta_max, fcf_cover_min,
+# dividend_record_min_years, interest_cover_min, market_cap_min_usd. Anything not listed uses the default.
+# Example:
+#   group_thresholds:
+#     "Tech (Not AI)":
+#       dividend_yield_min: 0.02
+#     "Consumer staples":
+#       dividend_yield_min: 0.035
+#       beta_max: 0.8
+group_thresholds: {}
 
 beta:
   months: 60                     # monthly returns on adjusted close versus the benchmark
