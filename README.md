@@ -1,7 +1,7 @@
 # US dividend stock screen (one-off snapshot)
 
 A reproducible screening exercise over the US-listed stocks in `baseline.md`, for a group project.
-It is not investment advice. See `HANDOFF.md` for the brief and `validation.md` for the checks made.
+It is not investment advice.
 
 ## Dependencies
 
@@ -26,8 +26,7 @@ python src/screen.py        # builds results.xlsx from the snapshot, no network 
 
 The raw snapshot and the output workbook are not in this repository (Yahoo's terms do not permit
 redistribution), so `fetch.py` has to be run first. It refuses to run unless `asof_date` in `config.yaml`
-is today's date, because Yahoo only serves current data; set it before fetching. Figures in
-`validation.md` refer to the snapshot of 10 November 2026 and will differ from a later fetch.
+is today's date, because Yahoo only serves current data; set it before fetching.
 
 ## Files
 

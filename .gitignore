@@ -10,3 +10,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Local working notes
+HANDOFF.md
+validation.md
