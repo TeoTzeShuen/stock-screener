@@ -1,7 +1,6 @@
-# US dividend stock screen (one-off snapshot)
+# US dividend stock screen
 
-A reproducible screening exercise over the US-listed stocks in `baseline.md`, for a group project.
-It is not investment advice.
+A reproducible screening exercise over the US-listed stocks in `baseline.md`.
 
 ## Dependencies
 
